@@ -1,7 +1,3 @@
----
-typora-copy-images-to: ./images
----
-
 ![banner](./images/banner.png)
 
 ## Convert JSON To Word Document
@@ -52,8 +48,8 @@ These should all be installed using the relevant tool for your target platform -
 
 Additionally, as the Python code will call APIs in Amazon Transcribe and, optionally, Amazon Comprehend, the target platform will need to have access to AWS access keys or an IAM role that gives access to the following API calls:
 
-- Amazon Transcribe - GetTranscriptionJob() and GetCallAnalyticsJob()
-- Amazon Comprehend - DetectSentiment()
+- Amazon Transcribe - *GetTranscriptionJob()* and *GetCallAnalyticsJob()*
+- Amazon Comprehend - *DetectSentiment()*
 
 ##### Parameters
 
