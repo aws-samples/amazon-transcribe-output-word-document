@@ -65,10 +65,6 @@ IMAGE_URL_BANNER = "https://raw.githubusercontent.com/aws-samples/amazon-transcr
 IMAGE_URL_SMILE = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/smile.png"
 IMAGE_URL_FROWN = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/frown.png"
 IMAGE_URL_NEUTRAL = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/neutral.png"
-# IMAGE_URL_BANNER = "https://d1zhzn9a509rch.cloudfront.net/images/banner.png"
-# IMAGE_URL_SMILE = "https://d1zhzn9a509rch.cloudfront.net/images/smile.png"
-# IMAGE_URL_FROWN = "https://d1zhzn9a509rch.cloudfront.net/images/frown.png"
-# IMAGE_URL_NEUTRAL = "https://d1zhzn9a509rch.cloudfront.net/images/neutral.png"
 
 # Additional Constants
 START_NEW_SEGMENT_DELAY = 2.0       # After n seconds pause by one speaker, put next speech in new segment
