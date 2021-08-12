@@ -199,12 +199,7 @@
             "IssuesDetected":
             [
                 {
-                    "RedactedCharacterOffsets":
-                    {
-                        "Begin": 26,
-                        "End": 41
-                    },
-                    "UnredactedCharacterOffsets":
+                    "CharacterOffsets":
                     {
                         "Begin": 26,
                         "End": 40
