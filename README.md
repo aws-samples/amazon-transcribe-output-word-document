@@ -38,11 +38,12 @@ The following table summarise which features are available in each mode.
 
 ##### Prerequisites
 
-This application relies upon three external python libraries, which you will need to install onto the system that you wise to deploy this application to.  They are as follows:
+This application relies upon four external python libraries, which you will need to install onto the system that you wise to deploy this application to.  They are as follows:
 
 - python-docx
 - scipy
 - matplotlib
+- boto3
 
 These should all be installed using the relevant tool for your target platform - typically this would be via `pip`, the Python package manager, but could be via `yum`, `apt-get` or something else.  Please consult your platform's Python documentation for more information.
 
