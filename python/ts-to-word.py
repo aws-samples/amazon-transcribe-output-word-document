@@ -66,6 +66,13 @@ IMAGE_URL_SMILE = "https://raw.githubusercontent.com/aws-samples/amazon-transcri
 IMAGE_URL_FROWN = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/frown.png"
 IMAGE_URL_NEUTRAL = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/neutral.png"
 
+# Definitions to use whilst scanning summarisation data
+CALL_SUMMARY_MAP = [
+    {"Field": "segmentIssuesDetected", "Title": "Issues Detected", "Color": "FF3333"},
+    {"Field": "segmentActionItemsDetected", "Title": "Action Items Detected", "Color": "FFB266"},
+    {"Field": "segmentOutcomesDetected", "Title": "Outcomes Detected", "Color": "66CC00"}
+]
+
 # Additional Constants
 START_NEW_SEGMENT_DELAY = 2.0       # After n seconds pause by one speaker, put next speech in new segment
 
@@ -87,6 +94,8 @@ class SpeechSegment:
         self.segmentLoudnessScores = []
         self.segmentInterruption = False
         self.segmentIssuesDetected = []
+        self.segmentActionItemsDetected = []
+        self.segmentOutcomesDetected = []
 
 
 def convert_timestamp(time_in_seconds):
@@ -122,6 +131,12 @@ def get_text_colour_analytics_sentiment(score):
 
     return background_colour
 
+
+def set_table_row_bold(row, bold):
+    for cell in row.cells:
+        for paragraph in cell.paragraphs:
+            for run in paragraph.runs:
+                run.font.bold = bold
 
 def set_transcript_text_style(run, force_highlight, confidence=0.0, rgb_color=None):
     """
@@ -197,41 +212,39 @@ def write_transcribe_text(output_table, sentiment_enabled, analytics_mode, speec
         if segment.segmentInterruption:
             run = row_cells[COL_CONTENT + content_col_offset].paragraphs[0].add_run("[INTERRUPTION]")
             set_transcript_text_style(run, True, confidence=0.0)
-            row_cells[COL_CONTENT + content_col_offset].paragraphs[0].add_run("  ")
+            row_cells[COL_CONTENT + content_col_offset].paragraphs[0].add_run(" ")
 
-        # Issues are in order - pick out the stop/start tuples
-        issues = segment.segmentIssuesDetected.copy()
-        if len(issues) > 0:
-            next_issue = issues.pop()
-        else:
-            next_issue = {}
+        # Summarised data blocks are in order - pick out the first for each of our
+        # types, as well as getting list of the remaining ones for this segment
+        issues, next_issue = setup_summarised_data(segment.segmentIssuesDetected)
+        actions, next_action = setup_summarised_data(segment.segmentActionItemsDetected)
+        outcomes, next_outcome = setup_summarised_data(segment.segmentOutcomesDetected)
 
         # Then do each word with confidence-level colouring
         text_index = 1
         live_issue = False
+        live_action = False
+        live_outcome = False
         for eachWord in segment.segmentConfidence:
-            # Are we at the start of an issue?
-            if len(next_issue) > 0:
-                if (next_issue["Begin"] == 0) or (next_issue["Begin"] == text_index):
-                    # If so, start the highlighting run
-                    run = row_cells[COL_CONTENT + content_col_offset].paragraphs[0].add_run(" [ISSUE]")
-                    set_transcript_text_style(run, True, confidence=0.0)
-                    live_issue = True
+            # Look to start a new summary block if needed, in strict priority order - issues, actions, then outcomes.
+            # We cannot start a new one until an existing one finishes, so if 2 overlap (unlikely) we skip the second
+            live_issue = start_summary_run_highlight(content_col_offset, live_issue, live_action or live_outcome,
+                                                     next_issue, row_cells, text_index, "[ISSUE]")
+            live_action = start_summary_run_highlight(content_col_offset, live_action, live_issue or live_outcome,
+                                                      next_action, row_cells, text_index, "[ACTION]")
+            live_outcome = start_summary_run_highlight(content_col_offset, live_outcome, live_issue or live_action,
+                                                       next_outcome, row_cells, text_index, "[OUTCOME]")
 
-            # Output the next word, with the correct confidence styling and forced backgroud
+            # Output the next word, with the correct confidence styling and forced background
             run = row_cells[COL_CONTENT + content_col_offset].paragraphs[0].add_run(eachWord["text"])
             text_index += len(eachWord["text"])
             confLevel = eachWord["confidence"]
-            set_transcript_text_style(run, live_issue, confidence=confLevel)
+            set_transcript_text_style(run, live_issue or live_outcome or live_action, confidence=confLevel)
 
-            # Has our issue now finished?
-            if live_issue and next_issue["End"] <= text_index:
-                # Yes - stop highlighting, and pick up any pending issue left on this line
-                live_issue = False
-                if len(issues) > 0:
-                    next_issue = issues.pop()
-                else:
-                    next_issue = {}
+            # Has any in-progress summarisation block now finished?  Check each one
+            live_issue, next_issue = stop_summary_run_highlight(issues, live_issue, next_issue, text_index)
+            live_action, next_action = stop_summary_run_highlight(actions, live_action, next_action, text_index)
+            live_outcome, next_outcome = stop_summary_run_highlight(outcomes, live_outcome, next_outcome, text_index)
 
         # If enabled, finish with the base sentiment for the segment - don't write out
         # score if it turns out that this segment ie neither Negative nor Positive
@@ -269,6 +282,78 @@ def write_transcribe_text(output_table, sentiment_enabled, analytics_mode, speec
             # If so, write out the line after this
             insert_category_row(content_col_offset, keyed_categories, output_table, end_in_millis)
             keyed_categories.pop(end_in_millis)
+
+
+def stop_summary_run_highlight(summaries, live_summary, next_summary, text_index):
+    """
+    Checks the supplied flags to see that particular type of call summary - e.g. issues or actions - has
+    reached the end of it's final word.  If so then it resets the flags and shifts the structures to
+    the next summary item of that type in this segment (there most-likely aren't any more)
+
+    :param summaries: List of remaining summary data items to be fully-processed
+    :param live_summary: Flag to indicate is this type of call summary data is currently running
+    :param next_summary: Start/end word offset information for the current/next summary data item
+    :param text_index: Text offset position for this segment what we've rendered up to
+    """
+
+    if live_summary and next_summary["End"] <= text_index:
+        # Yes - stop highlighting, and pick up any pending summary left on this line of this type
+        live_summary = False
+        if len(summaries) > 0:
+            next_summary = summaries.pop()
+        else:
+            next_summary = {}
+    return live_summary, next_summary
+
+
+def start_summary_run_highlight(content_col_offset, this_summary, other_summaries, next_summ_item, row_cells,
+                                text_index, output_phrase):
+    """
+    This looks at a call summary data block to see if it has started - if it has then we output a
+    message with a highlight and set the text-run highlighting to continue.  If a summary block of
+    any other type is currently in-progress then we skip displaying this one, as in a Word document
+    the highlighting would be confusing and hard to do.
+
+    :param content_col_offset: Offset into the Word table so we can skip non-existent sentiment columns
+    :param this_summary: Flag indicating if a highlighting run for this type is already in progress
+    :param other_summaries: Flag indicating if a highlighting run for any other type is already in progress
+    :param next_summ_item: The next summary item to be considered for highlighting
+    :param row_cells: Cell reference in the Word table for the current speech segment
+    :param text_index: Text offset position for this segment what we've rendered up to
+    :param output_phrase: Phrase to use in the transcript to mark the start of this highighting run
+    """
+
+    new_summary = this_summary
+
+    if len(next_summ_item) > 0 and not this_summary and not other_summaries:
+        if (next_summ_item["Begin"] == 0 and text_index == 1) or (next_summ_item["Begin"] == text_index):
+            # If so, start the highlighting run, tagging on a leading/trailing
+            # highlight space depending on where were are in the segment
+            if text_index == 1:
+                next_phrase = output_phrase + " "
+            else:
+                next_phrase = " " + output_phrase
+            run = row_cells[COL_CONTENT + content_col_offset].paragraphs[0].add_run(next_phrase)
+            set_transcript_text_style(run, True, confidence=0.0)
+            new_summary = True
+
+    return new_summary
+
+
+def setup_summarised_data(summary_block):
+    """
+    Creates a copy of specified call-summary data block in preparation for writing out the transcription.  This is
+    used for each of the supported summary data types.  Returns the first item in the block, or {} if there
+    aren't any items, as well as the copy of the block minus the header item
+
+    :param summary_block: The summarise block of data that we're interested in
+    """
+    summary_data = summary_block.copy()
+    if len(summary_data) > 0:
+        next_data_item = summary_data.pop()
+    else:
+        next_data_item = {}
+    return summary_data, next_data_item
 
 
 def insert_category_row(content_col_offset, keyed_categories, output_table, timestamp_millis):
@@ -404,7 +489,7 @@ def write_small_header_text(document, text, confidence):
     run.font.italic = True
 
 
-def write(cli_arguments, speech_segments, job_status):
+def write(cli_arguments, speech_segments, job_status, summaries_detected):
     """
     Write a transcript from the .json transcription file and other data generated
     by the results parser, putting it all into a human-readable Word document
@@ -412,6 +497,7 @@ def write(cli_arguments, speech_segments, job_status):
     :param cli_arguments: CLI arguments used for this processing run
     :param speech_segments: List of call speech segments
     :param job_status: Status of the Transcribe job
+    :param summaries_detected: Flag to indicate presence of call summary data
     """
 
     json_filepath = Path(cli_arguments.inputFile)
@@ -460,7 +546,7 @@ def write(cli_arguments, speech_segments, job_status):
     # -- Media information
     # -- Amazon Transcribe job information
     # -- Average transcript word-confidence scores
-    write_custom_text_header(document, "Call Summary")
+    write_custom_text_header(document, "Amazon Transcribe Audio Source")
     table = document.add_table(rows=1, cols=2)
     table.style = document.styles[TABLE_STYLE_STANDARD]
     table.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -545,8 +631,11 @@ def write(cli_arguments, speech_segments, job_status):
                                        data["ConversationCharacteristics"]["NonTalkTime"],
                                        data["ConversationCharacteristics"]["TalkTime"], tempFiles)
             keyed_categories = write_detected_categories(document, data["Categories"]["MatchedDetails"])
-            write_detected_issue_summaries(document, speech_segments)
             write_analytics_sentiment(data, document)
+
+            # Write out any call summarisation data
+            if summaries_detected:
+                write_detected_summaries(document, speech_segments)
         else:
             # No analytics => no categories
             keyed_categories = {}
@@ -929,60 +1018,86 @@ def write_detected_categories(document, category_list):
     return timed_categories
 
 
-def write_detected_issue_summaries(document, speech_segments):
+def write_detected_summaries(document, speech_segments):
     """
-    Scans the speech segments for any detected issues, and if there are any then a new table is added
-    to the document.
+    Scans the speech segments for any detected summaries of the requested type, and if there are any
+    then a new table is added to the document.  This assumes that we do have some summaries, as if
+    not we'll just output a table header on its own
+
     :param document: Word document structure to write the table into
     :param speech_segments: Call transcript structures
     """
 
-    # Scan through the segments and extract the issues
-    issues_detected = []
-    for turn in speech_segments:
-        for issue in turn.segmentIssuesDetected:
-            new_issue = {"Speaker": turn.segmentSpeaker}
-            new_issue["Timestamp"] = turn.segmentStartTime
-            new_issue["Text"] = turn.segmentText[issue["Begin"]:issue["End"]]
-            # May need a prefix or suffix for partial text
-            if issue["Begin"] > 0:
-                new_issue["Text"] = "..." + new_issue["Text"]
-            if issue["End"] < len(turn.segmentText):
-                new_issue["Text"] = new_issue["Text"] + "..."
-            issues_detected.append(new_issue)
+    # Start with a new single-column section
+    document.add_section(WD_SECTION.CONTINUOUS)
+    section_ptr = document.sections[-1]._sectPr
+    cols = section_ptr.xpath('./w:cols')[0]
+    cols.set(qn('w:num'), '1')
+    table = document.add_table(rows=1, cols=3)
+    table.style = document.styles[TABLE_STYLE_STANDARD]
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = "Call Summary Highlights"
+    hdr_cells[0].merge(hdr_cells[2])
 
-    if issues_detected:
-        # Start with a new single-column section
-        document.add_section(WD_SECTION.CONTINUOUS)
-        section_ptr = document.sections[-1]._sectPr
-        cols = section_ptr.xpath('./w:cols')[0]
-        cols.set(qn('w:num'), '1')
-        write_custom_text_header(document, "Issues Detected")
+    # Loop through each of our summary types
+    for summary_map in CALL_SUMMARY_MAP:
+        # Scan through the segments and extract the issues
+        summary_detected = []
+        for turn in speech_segments:
+            summary_block = getattr(turn, summary_map["Field"])
+            # for issue in turn.myVar:
+            for issue in summary_block:
+                new_summary = {"Speaker": turn.segmentSpeaker}
+                new_summary["Timestamp"] = turn.segmentStartTime
+                new_summary["Text"] = turn.segmentText[issue["Begin"]:issue["End"]]
+                # May need a prefix or suffix for partial text
+                if issue["Begin"] > 0:
+                    new_summary["Text"] = "..." + new_summary["Text"]
+                if issue["End"] < len(turn.segmentText):
+                    new_summary["Text"] = new_summary["Text"] + "..."
+                summary_detected.append(new_summary)
 
-        # Table header information
-        table = document.add_table(rows=1, cols=3)
-        table.style = document.styles[TABLE_STYLE_STANDARD]
-        hdr_cells = table.rows[0].cells
-        hdr_cells[0].text = "Speaker"
-        hdr_cells[1].text = "Turn Time"
-        hdr_cells[2].text = "Detected Text"
-
-        # Output each row
-        for issue in issues_detected:
-            # First column is the speaker
+        # If we found some of this type then write out a table
+        if summary_detected:
+            # Header section for this block
             row_cells = table.add_row().cells
-            row_cells[0].text = issue["Speaker"]
-            row_cells[1].text = convert_timestamp(issue["Timestamp"])
-            row_cells[2].text = issue["Text"]
+            row_cells[0].text = summary_map["Title"]
+            set_table_cell_background_colour(row_cells[0], summary_map["Color"])
+            row_cells[0].merge(row_cells[2])
 
-        # Formatting transcript table widths
-        widths = (Cm(2.2), Cm(2.2), Cm(12.8))
-        for row in table.rows:
-            for idx, width in enumerate(widths):
-                row.cells[idx].width = width
+            # Column header section for this block
+            next_row = table.add_row()
+            row_cells = next_row.cells
+            row_cells[0].text = "Speaker"
+            row_cells[1].text = "Turn Time"
+            row_cells[2].text = "Detected Text"
+            set_table_row_bold(next_row, True)
+            shading_reqd = False
 
-        # Finish with some spacing
-        document.add_paragraph()
+            # Output each row
+            for issue in summary_detected:
+                # First column is the speaker
+                next_row = table.add_row()
+                row_cells = next_row.cells
+                row_cells[0].text = issue["Speaker"]
+                row_cells[1].text = convert_timestamp(issue["Timestamp"])
+                row_cells[2].text = issue["Text"]
+                set_table_row_bold(next_row, False)
+
+                # Add highlighting to the row if required; e.g. every 2nd row
+                if shading_reqd:
+                    for column in range(0, 3):
+                        set_table_cell_background_colour(row_cells[column], ALTERNATE_ROW_COLOUR)
+                shading_reqd = not shading_reqd
+
+            # Formatting transcript table widths
+            widths = (Cm(2.2), Cm(2.2), Cm(12.8))
+            for row in table.rows:
+                for idx, width in enumerate(widths):
+                    row.cells[idx].width = width
+
+    # Finish with some spacing
+    document.add_paragraph()
 
 
 def build_call_loudness_charts(document, speech_segments, interruptions, quiet_time, talk_time, temp_files):
@@ -1347,8 +1462,10 @@ def create_turn_by_turn_segments(data, cli_args):
     :param data: JSON result data from Transcribe
     :param cli_args: CLI arguments used for this processing run
     :return: List of transcription speech segments
+    :return: Flag to indicate the presence of call summary data
     """
     speechSegmentList = []
+    summaries_detected = False
 
     # Decide on our operational mode - it's in the job-status or, if necessary, infer it from the data file
     # STANDARD => speaker separated, channel separated;  ANALYTICS => different format
@@ -1532,9 +1649,24 @@ def create_turn_by_turn_segments(data, cli_args):
 
             # Record any issues detected
             if "IssuesDetected" in turn:
+                summaries_detected = True
                 for issue in turn["IssuesDetected"]:
                     # Grab the transcript offsets for the issue text
                     nextSpeechSegment.segmentIssuesDetected.append(issue["CharacterOffsets"])
+
+            # Record any actions detected
+            if "ActionItemsDetected" in turn:
+                summaries_detected = True
+                for action in turn["ActionItemsDetected"]:
+                    # Grab the transcript offsets for the issue text
+                    nextSpeechSegment.segmentActionItemsDetected.append(action["CharacterOffsets"])
+
+            # Record any outcomes detected
+            if "OutcomesDetected" in turn:
+                summaries_detected = True
+                for outcome in turn["OutcomesDetected"]:
+                    # Grab the transcript offsets for the issue text
+                    nextSpeechSegment.segmentOutcomesDetected.append(outcome["CharacterOffsets"])
 
             # Process each word in this turn
             for word in turn["Items"]:
@@ -1574,8 +1706,9 @@ def create_turn_by_turn_segments(data, cli_args):
                 nextSpeechSegment.segmentNegative = 1.0
                 nextSpeechSegment.segmentSentimentScore = 1.0
 
-    # Return our full turn-by-turn speaker segment list with sentiment
-    return speechSegmentList
+    # Return our full turn-by-turn speaker segment list with sentiment,
+    # along with a flag to indicate the presence of call summary data
+    return speechSegmentList, summaries_detected
 
 
 def load_transcribe_job_status(cli_args):
@@ -1691,7 +1824,7 @@ def generate_document():
 
     # Generate the core transcript
     start = perf_counter()
-    speech_segments = create_turn_by_turn_segments(json_data, cli_args)
+    speech_segments, summaries_detected = create_turn_by_turn_segments(json_data, cli_args)
 
     # Inject Comprehend-based sentiments into the segment list if required
     if cli_args.sentiment == 'on':
@@ -1710,7 +1843,7 @@ def generate_document():
             cli_args.sentiment = 'off'
 
     # Write out our file and the performance statistics
-    write(cli_args, speech_segments, job_info)
+    write(cli_args, speech_segments, job_info, summaries_detected)
     finish = perf_counter()
     duration = round(finish - start, 2)
     print(f"> Transcript {cli_args.outputFile} writen in {duration} seconds.")
