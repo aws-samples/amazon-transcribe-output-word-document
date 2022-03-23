@@ -1153,7 +1153,7 @@ def build_call_loudness_charts(document, speech_segments, interruptions, quiet_t
         haveAgent = False
         haveCaller = True
         plotRows = 1
-    elif talk_time["DetailsByParticipant"]["CUSTOMER"]["TotalTimeMillis"] == 0:
+    elif "CUSTOMER" not in talk_time["DetailsByParticipant"] or talk_time["DetailsByParticipant"]["CUSTOMER"]["TotalTimeMillis"] == 0:
         final_second = max(secsLoudAgent)
         max_decibel = max(dbLoudAgent)
         haveAgent = True
