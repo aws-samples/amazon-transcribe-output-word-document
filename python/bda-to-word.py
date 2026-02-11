@@ -21,6 +21,7 @@ from docx.enum.section import WD_SECTION
 from docx.oxml.shared import OxmlElement
 from docx.oxml.ns import nsdecls
 from docx.oxml import parse_xml
+from docx.oxml.ns import qn
 from pathlib import Path
 from time import perf_counter
 from scipy.interpolate import make_interp_spline
@@ -61,7 +62,7 @@ MIN_SENTIMENT_POSITIVE = 0.6
 SENTIMENT_LANGUAGES = ["en", "es", "fr", "de", "it", "pt", "ar", "hi", "ja", "ko", "zh-TW", "zh"]
 
 # Image download URLS
-IMAGE_URL_BANNER = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/banner.png"
+IMAGE_URL_BANNER = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/banner-bda.png"
 IMAGE_URL_SMILE = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/smile.png"
 IMAGE_URL_FROWN = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/frown.png"
 IMAGE_URL_NEUTRAL = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/neutral.png"
@@ -340,19 +341,92 @@ def load_image(url):
     return io_url
 
 
-def write(cli_arguments, speech_segments):
+def create_text_array(whole_array):
+    """
+    Iterates through an array and returns a single-line text representation of it
+
+    :param whole_array: Array to iterate through
+    :return: Single text value representing the whole array
+    """
+    index = 0
+    text_line = ""
+
+    for array_element in whole_array:
+        # If we're the 2nd+ line then add some spaceing
+        if index > 0:
+            text_line += ", "
+        text_line += array_element
+        index += 1
+
+    return text_line
+
+
+def yes_or_no_icon(check):
+    """
+    Writes a consistent icon for a boolean value
+    :param check: Boolean to indicate the check needed
+    :return: Consistent checkmark icon
+    """
+    if check:
+        return "✅"
+    else:
+        return "❌"
+
+
+def create_pie_chart(document, temp_files, output_file_name, pie_value):
+    """
+    Creates a segmented pie chart with two segments sized 1..5, and both segments fill
+    up the pie up to 5 chunks in size
+
+    :param document: Document we're writing into
+    :param temp_files: List of temporary files we're creating
+    :param output_file_name: Name for this temporary file
+    :param pie_value: Size (1..5) of the leading pie number
+    """
+    fig, ax = plt.subplots()
+
+    size = 0.8
+    sizes = [pie_value, 5-pie_value]
+
+    second_colour_offset = [19, 4, 7, 3, 10, 8][int(pie_value)]
+    tab20c = plt.color_sequences["tab20c"]
+    outer_colors = [tab20c[i] for i in [second_colour_offset, 19]]
+
+    ax.pie(sizes, radius=1.5, colors=outer_colors, startangle=90, wedgeprops=dict(width=size, edgecolor='w'))
+    ax.text(0, 0, str(pie_value), ha='center', va='center', fontsize=36, fontweight='bold')
+
+    chart_file_name = "./" + output_file_name + ".png"
+    plt.savefig(chart_file_name)
+    temp_files.append(chart_file_name)
+    plt.clf()
+    document.add_picture(chart_file_name, width=Cm(3.5))
+    document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
+def set_section_columns(document, columns):
+    """
+    :param document: The document holding the final (our) section
+    :param columns: Number of columns to set on the section
+    """
+    section_ptr = document.sections[-1]._sectPr
+    cols = section_ptr.xpath('./w:cols')[0]
+    cols.set(qn('w:num'), str(columns))
+
+
+def write(cli_arguments, speech_segments, custom_json):
     """
     Write a transcript from the .json transcription file and other data generated
     by the results parser, putting it all into a human-readable Word document
 
     :param cli_arguments: CLI arguments used for this processing run
     :param speech_segments: List of call speech segments
+    :param custom_json: Custom JSON data associated with our original input file
     """
 
     json_filepath = Path(cli_arguments.inputFile)
     data = json.load(open(json_filepath.absolute(), "r", encoding="utf-8"))
     sentimentEnabled = (cli_arguments.sentiment == 'on')
-    tempFiles = []
+    temp_files = []
     timed_topics = []
 
     # Initiate Document, orientation and margins
@@ -382,20 +456,29 @@ def write(cli_arguments, speech_segments):
     # Intro banner header
     document.add_picture(load_image(IMAGE_URL_BANNER), width=Mm(171))
 
+    # We need 2 columns only if we're in custom mode, as we put the custom summary on the right of the table
+    if custom_json != {}:
+        document.add_section(WD_SECTION.CONTINUOUS)
+        set_section_columns(document, 2)
+
     # Write out the call summary table
-    write_custom_text_header(document, "Amazon BDA Audio Results")
     table = document.add_table(rows=1, cols=2)
     table.style = document.styles[TABLE_STYLE_STANDARD]
     table.alignment = WD_ALIGN_PARAGRAPH.LEFT
     hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = "Audio Filename"
-    hdr_cells[1].text = data["metadata"]["s3_key"]
+    hdr_cells[0].text = "Amazon BDA Audio Metadata"
+    hdr_cells[0].merge(hdr_cells[1])
+
+    # Now add in the data row by row
     job_data = []
+    job_data.append({"name": "Audio Filename", "value": data["metadata"]["s3_key"]})
     job_data.append({"name": "Audio Duration", "value": convert_timestamp(data["metadata"]["duration_millis"] / 1000)})
     output_data = str(data["metadata"]["sample_rate"])
     output_data += "kHz "
     output_data +=  data["metadata"]["format"] + "-file"
     job_data.append({"name": "Audio Format", "value": str(output_data)})
+    job_data.append({"name": "Dominant Language", "value": data["metadata"]["dominant_asset_language"]})
+    job_data.append({"name": "Generative Language", "value": data["metadata"]["generative_output_language"]})
    
     # Place all of our job-summary fields into the Table, one row at a time
     for next_row in job_data:
@@ -412,23 +495,166 @@ def write(cli_arguments, speech_segments):
     # Spacer paragraph
     document.add_paragraph()
 
+    # Put any custom fields on the RHS of the page
+    if custom_json != {}:
+        # Write out the custom metadata table
+        document.add_section(WD_SECTION.NEW_COLUMN)
+        table = document.add_table(rows=1, cols=2)
+        table.style = document.styles[TABLE_STYLE_STANDARD]
+        table.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        hdr_cells = table.rows[0].cells
+        hdr_cells[0].text = "Amazon BDA Audio Custom Metadata"
+        hdr_cells[0].merge(hdr_cells[1])
+
+        # Add in each repeatable block
+        job_data = []
+        job_data.append({"name": "Categories", "value": create_text_array(custom_json["inference_result"]["call_categories"])})
+        job_data.append({"name": "Topics", "value": create_text_array(custom_json["inference_result"]["call_topics"])})
+        job_data.append({"name": "Issues", "value": create_text_array(custom_json["inference_result"]["call_issues"])})
+        job_data.append({"name": "Intents", "value": create_text_array(custom_json["inference_result"]["call_intents"])})
+        job_data.append({"name": "Agent Actions", "value": create_text_array(custom_json["inference_result"]["agent_actions"])})
+        job_data.append({"name": "Pending Actions", "value": create_text_array(custom_json["inference_result"]["agent_pending_action_items"])})
+
+        # Place all of our job-summary fields into the Table, one row at a time
+        for next_row in job_data:
+            row_cells = table.add_row().cells
+            row_cells[0].text = next_row["name"]
+            row_cells[1].text = next_row["value"]
+
+        # Formatting transcript table widths
+        widths = (Cm(3.0), Cm(5.1))
+        for row in table.rows:
+            for idx, width in enumerate(widths):
+                row.cells[idx].width = width
+
+    # New single-column section
+    document.add_section(WD_SECTION.CONTINUOUS)
+    set_section_columns(document, 1)
+
     # At this point, if we have no transcript then we need to quickly exit
     if len(speech_segments) == 0:
-        document.add_section(WD_SECTION.CONTINUOUS)
         write_custom_text_header(document, "This call had no audible speech to transcribe.")
     else:
         # Write out any call summarisation data
-        if "summary" in data["audio"]:
-            write_detected_summaries(document, data["audio"])
+        if (custom_json != {}) and ("call_summary" in custom_json["inference_result"]):
+            # The custom version is shorter, so let's use it if we can
+            write_detected_summaries(document, custom_json["inference_result"]["call_summary"])
+        elif "summary" in data["audio"]:
+            # The standard call summary in BDA may not exist if the call isn't summarisable
+            write_detected_summaries(document, data["audio"]["summary"])
+
+        # Write out our custom table on how the call went, along with our 1-5 charts
+        if custom_json != {}:
+            # Start with our 1-5 bars
+            document.add_section(WD_SECTION.CONTINUOUS)
+            set_section_columns(document, 3)
+
+            # Do all the bars
+            write_custom_text_header(document, 'Customer Satisfaction', position=WD_ALIGN_PARAGRAPH.CENTER)
+            create_pie_chart(document, temp_files, "yes_no_chart_1", int(custom_json["inference_result"]["caller_satisfaction_level"]))
+            document.add_section(WD_SECTION.NEW_COLUMN)
+            write_custom_text_header(document, 'Caller Emotion', position=WD_ALIGN_PARAGRAPH.CENTER)
+            create_pie_chart(document, temp_files, "yes_no_chart_2", int(custom_json["inference_result"]["caller_emotion_rating"]))
+            document.add_section(WD_SECTION.NEW_COLUMN)
+            write_custom_text_header(document, 'Agent Emotion', position=WD_ALIGN_PARAGRAPH.CENTER)
+            create_pie_chart(document, temp_files, "yes_no_chart_3", int(custom_json["inference_result"]["agent_emotion_rating"]))
+
+            # Output other tables - start with how the call went
+            document.add_section(WD_SECTION.CONTINUOUS)
+            set_section_columns(document, 3)
+
+            table = document.add_table(rows=1, cols=2, style=TABLE_STYLE_STANDARD)
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = "Call Success"
+            hdr_cells[0].merge(hdr_cells[1])
+
+            # Add in each repeatable block
+            job_data = []
+            job_data.append({"name": "Call Issue Resolved", "value": yes_or_no_icon(custom_json["inference_result"]["issue_resolution"])})
+            job_data.append({"name": "Call Opening Used", "value": yes_or_no_icon(custom_json["inference_result"]["call_opening"])})
+            job_data.append({"name": "Call Wrapup Used", "value": yes_or_no_icon(custom_json["inference_result"]["call_wrapup"])})
+            job_data.append({"name": "Caller Neg Emotion", "value": yes_or_no_icon(custom_json["inference_result"]["caller_negative_emotion"])})
+
+            # Place all of our job-summary fields into the Table, one row at a time
+            for next_row in job_data:
+                row_cells = table.add_row().cells
+                row_cells[0].text = next_row["name"]
+                row_cells[1].text = next_row["value"]
+
+            # Formatting transcript table widths
+            widths = [Inches(3.0), Inches(1.0)]
+            for row in table.rows:
+                row.cells[0].width = widths[0]
+                row.cells[1].width = widths[1]
+
+            # Finish off spacing
+            document.add_paragraph()
+
+            # Next block is the caller sentiment table
+            document.add_section(WD_SECTION.NEW_COLUMN)
+
+            table = document.add_table(rows=1, cols=2, style=TABLE_STYLE_STANDARD)
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = "Caller Sentiment"
+            hdr_cells[0].merge(hdr_cells[1])
+            row_cells = table.add_row().cells
+            row_cells[0].text = custom_json["inference_result"]["caller_sentiment_summary"]
+            row_cells[0].merge(row_cells[1])
+            row_cells[0].paragraphs[0].runs[0].font.bold = False
+
+            # Add in each repeatable block
+            job_data = []
+            job_data.append({"name": "Emotion Label", "value": custom_json["inference_result"]["caller_emotion_label"]})
+            job_data.append({"name": "End Sentiment", "value": custom_json["inference_result"]["caller_end_sentiment"]})
+            job_data.append({"name": "Improvement", "value": custom_json["inference_result"]["caller_emotion_improvement"]})
+
+            # Place all of our job-summary fields into the Table, one row at a time
+            for next_row in job_data:
+                row_cells = table.add_row().cells
+                row_cells[0].text = next_row["name"]
+                row_cells[1].text = next_row["value"]
+
+            # Formatting transcript table widths
+            widths = [Inches(2.5), Inches(1.5)]
+            for row in table.rows:
+                row.cells[0].width = widths[0]
+                row.cells[1].width = widths[1]
+
+            # Next block is the agent sentiment table
+            document.add_section(WD_SECTION.NEW_COLUMN)
+
+            table = document.add_table(rows=1, cols=2, style=TABLE_STYLE_STANDARD)
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = "Agent Sentiment"
+            hdr_cells[0].merge(hdr_cells[1])
+            row_cells = table.add_row().cells
+            row_cells[0].text = custom_json["inference_result"]["agent_sentiment_summary"]
+            row_cells[0].merge(row_cells[1])
+            row_cells[0].paragraphs[0].runs[0].font.bold = False
+
+            # Add in each repeatable block
+            job_data = []
+            job_data.append({"name": "Emotion Label", "value": custom_json["inference_result"]["agent_emotion_label"]})
+            job_data.append({"name": "End Sentiment", "value": custom_json["inference_result"]["agent_end_sentiment"]})
+
+            # Place all of our job-summary fields into the Table, one row at a time
+            for next_row in job_data:
+                row_cells = table.add_row().cells
+                row_cells[0].text = next_row["name"]
+                row_cells[1].text = next_row["value"]
+
+            # Formatting transcript table widths
+            widths = [Inches(2.5), Inches(1.5)]
+            for row in table.rows:
+                row.cells[0].width = widths[0]
+                row.cells[1].width = widths[1]
+
+            document.add_section(WD_SECTION.CONTINUOUS)
 
         # Work out where our topics happened
         if "topics" in data:
             for topic in data["topics"]:
                 timed_topics.append({"start_time": topic["start_timestamp_millis"], "index": topic["topic_index"]})
-
-        # Write out an call topics data
-        if "topics" in data:
-            write_topic_reasons(document, data["topics"])
 
         # Process and display transcript by speaker segments (new section)
         # -- Conversation "turn" start time and duration
@@ -436,6 +662,7 @@ def write(cli_arguments, speech_segments):
         # -- Sentiment type (if enabled) and sentiment score (if available)
         # -- Transcribed text with (if available) Call Analytics markers
         document.add_section(WD_SECTION.CONTINUOUS)
+        set_section_columns(document, 1)
         write_custom_text_header(document, "Call Transcription")
         table_cols = 4
         if sentimentEnabled:
@@ -475,133 +702,34 @@ def write(cli_arguments, speech_segments):
         # Setup the repeating header
         set_repeat_table_header(table.rows[0])
 
+        # Write out an call topics data
+        if "topics" in data:
+            write_topic_reasons(document, data["topics"])
+
         # Generate our raw data for the Comprehend sentiment graph (if requested)
         if sentimentEnabled:
-            write_comprehend_sentiment(document, speech_segments, tempFiles)
+            write_comprehend_sentiment(document, speech_segments, temp_files)
 
     # Save the whole document
     document.save(cli_arguments.outputFile)
 
     # Now delete any local images that we created
-    for filename in tempFiles:
+    for filename in temp_files:
         os.remove(filename)
 
 
-def write_header_graphs(data, document, temp_files):
-    """
-    Writes out the two header-level graphs for caller sentiment and talk-time split
-
-    :param data: JSON result data from Transcribe
-    :param document: Word document structure to write the table into
-    :param temp_files: List of temporary files for later deletion
-    """
-    characteristics = data["ConversationCharacteristics"]
-    # Caller sentiment graph
-    fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(12.5 / 2.54, 8 / 2.54), gridspec_kw={'width_ratios': [4, 3]})
-    period_sentiment = characteristics["Sentiment"]["SentimentByPeriod"]["QUARTER"]
-    # Graph configuration
-    ax[0].set_xlim(xmin=1, xmax=4)
-    ax[0].set_ylim(ymax=5, ymin=-5)
-    ax[0].yaxis.set_major_locator(ticker.MultipleLocator(5.0))
-    ax[0].spines['bottom'].set_position('zero')
-    ax[0].spines['top'].set_color('none')
-    ax[0].spines['right'].set_color('none')
-    ax[0].set_xticks([])
-    ax[0].set_title("Customer sentiment", fontsize=10, fontweight="bold", pad="12.0")
-    # Only draw the sentiment line if we actually have a Customer that talked
-    if "CUSTOMER" in period_sentiment:
-        # Setup our data holders, then extract it all
-        x_sentiment = np.array([])
-        y_sentiment = np.array([])
-        period_index = 1
-        for score in period_sentiment["CUSTOMER"]:
-            x_sentiment = np.append(x_sentiment, period_index)
-            y_sentiment = np.append(y_sentiment, score["Score"])
-            period_index += 1
-
-        # Set the line colour to match the overall sentiment
-        if characteristics["Sentiment"]["OverallSentiment"]["CUSTOMER"] >= 0.0:
-            line_colour = "darkgreen"
-        else:
-            line_colour = "red"
-
-        # Now draw out the simple line plot
-        x_new = np.linspace(1, 4, 200)
-        spline = make_interp_spline(x_sentiment, y_sentiment)
-        y_smooth = spline(x_new)
-        ax[0].plot(x_new, y_smooth, linewidth=3, color=line_colour)
-    # Talk time calculations and ratios
-    non_talk = characteristics["NonTalkTime"]["Instances"]
-    quiet_time = 0
-    for quiet in non_talk:
-        quiet_time += quiet["DurationMillis"]
-    if "AGENT" in characteristics["TalkTime"]["DetailsByParticipant"]:
-        agent_talk_time = characteristics["TalkTime"]["DetailsByParticipant"]["AGENT"]["TotalTimeMillis"]
-    else:
-        agent_talk_time = 0
-    if "CUSTOMER" in characteristics["TalkTime"]["DetailsByParticipant"]:
-        caller_talk_time = characteristics["TalkTime"]["DetailsByParticipant"]["CUSTOMER"]["TotalTimeMillis"]
-    else:
-        caller_talk_time = 0
-    total_time = agent_talk_time + caller_talk_time + quiet_time
-    if total_time > 0:
-        quiet_ratio = quiet_time / total_time * 100.0
-        agent_ratio = agent_talk_time / total_time * 100.0
-        caller_ratio = caller_talk_time / total_time * 100.0
-    else:
-        quiet_ratio = 0.0
-        agent_ratio = 0.0
-        caller_ratio = 0.0
-    ratio_format = "{speaker} ({ratio:.1f}%)"
-    # Additional configuration
-    ax[1].set_xticks([])
-    ax[1].set_yticks([])
-    ax[1].set_title("Talk time", fontsize=10, fontweight="bold", pad="10.0")
-    ax[1].spines['top'].set_color('none')
-    ax[1].spines['bottom'].set_color('none')
-    ax[1].spines['left'].set_color('none')
-    ax[1].spines['right'].set_color('none')
-    # Now draw out the plot
-    labels = ["time"]
-    width = 1.0
-    ax[1].bar(labels, [quiet_time], width, label=ratio_format.format(ratio=quiet_ratio, speaker="Non-Talk"),
-              bottom=[agent_talk_time + caller_talk_time])
-    ax[1].bar(labels, [caller_talk_time], width, label=ratio_format.format(ratio=caller_ratio, speaker="Customer"),
-              bottom=[agent_talk_time])
-    ax[1].bar(labels, [agent_talk_time], width, label=ratio_format.format(ratio=agent_ratio, speaker="Agent"))
-    box = ax[1].get_position()
-    ax[1].set_position([box.x0, box.y0 + box.height * 0.25, box.width, box.height * 0.75])
-    ax[1].legend(loc="upper center", bbox_to_anchor=(0.5, -0.05), ncol=1)
-    chart_file_name = "./" + "talk-time.png"
-    plt.savefig(chart_file_name, facecolor="aliceblue")
-    temp_files.append(chart_file_name)
-    document.add_picture(chart_file_name, width=Cm(7.5))
-    plt.clf()
-
-
-def write_custom_text_header(document, text_label):
+def write_custom_text_header(document, text_label, position=WD_ALIGN_PARAGRAPH.LEFT):
     """
     Adds a run of text to the document with the given text label, but using our customer text-header style
 
     :param document: Word document structure to write the table into
     :param text_label: Header text to write out
+    :paran position: Optional parameter to speficy the paragraph align method
     :return:
     """
     paragraph = document.add_paragraph(text_label)
     paragraph.style = CUSTOM_STYLE_HEADER
-
-
-def insert_line_and_col_break(document):
-    """
-    Inserts a line break and column break into the document
-
-    :param document: Word document structure to write the breaks into
-    """
-    # Blank line followed by column break
-    document.add_paragraph()  # Spacing
-    run = document.paragraphs[-1].add_run()
-    run.add_break(WD_BREAK.LINE)
-    run.add_break(WD_BREAK.COLUMN)
+    paragraph.paragraph_format.alignment = position
 
 
 def write_topic_reasons(document, topics):
@@ -631,16 +759,19 @@ def write_topic_reasons(document, topics):
         row.cells[0].width = widths[0]
         row.cells[1].width = widths[1]
 
+    # Setup the repeating header
+    set_repeat_table_header(table.rows[0])
+
     # Finish off spacing
     document.add_paragraph()
 
 
-def write_detected_summaries(document, audio):
+def write_detected_summaries(document, summary_text):
     """
     Outputs the detected speed summary on its own
 
     :param document: Word document structure to write the table into
-    :param audio: Call transcript structures
+    :param summary_text: Call summary text
     """
 
     # Start with a new single-column section
@@ -653,7 +784,7 @@ def write_detected_summaries(document, audio):
     run.bold = True
     run.font.color.rgb = RGBColor(255, 255, 255)
     row_cells = table.add_row().cells
-    row_cells[0].text = audio["summary"]
+    row_cells[0].text = summary_text
 
     # Finish off with some spacing
     document.add_paragraph()
@@ -826,12 +957,12 @@ def generate_document():
     # Parameter extraction
     cli_parser = argparse.ArgumentParser(prog='bda-to-word',
                                          description='Turn an Amazon Bedrock Data Autimation Audio job output into an MS Word document')
-    source_group = cli_parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument('--inputFile', metavar='filename', type=str, help='File containing BDA output JSON output')
+    cli_parser.add_argument('--inputFile', metavar='filename', type=str, help='File containing BDA output JSON output', required=True)
     cli_parser.add_argument('--outputFile', metavar='filename', type=str, help='Output file to hold MS Word document')
     cli_parser.add_argument('--guardrailCheck', choices=['on', 'off'], default='off', help='Enables or disable reporting of guardrail breaches')
     cli_parser.add_argument('--guardrailLimit', type=float, default=0.2, help='Threshold limit for reporting guardrail breaches')
     cli_parser.add_argument('--sentiment', choices=['on', 'off'], default='off', help='Enables sentiment analysis on each conversational turn via Amazon Comprehend')
+    cli_parser.add_argument('--customFile', metavar='filename', type=str, help='File containing standard BDA Audio custom blueprint output')
     cli_args = cli_parser.parse_args()
 
     # Load in the JSON file for processing
@@ -839,12 +970,22 @@ def generate_document():
     if json_filepath.is_file():
         json_data = json.load(open(json_filepath.absolute(), "r", encoding="utf-8"))
     else:
-        print("FAIL: Specified JSON file '{0}' does not exists.".format(cli_args.inputFile))
+        print("FAIL: Specified JSON file '{0}' does not exist.".format(cli_args.inputFile))
         exit(-1)
 
     # Do something with the outputFile
     if cli_args.outputFile is None:
         cli_args.outputFile = cli_args.inputFile + ".docx"
+
+    # Flag to indicate we have custom file output too
+    custom_json_data = {}
+    if cli_args.customFile is not None:
+        custom_json_filepath = Path(cli_args.customFile)
+        if custom_json_filepath.is_file():
+            custom_json_data = json.load(open(custom_json_filepath.absolute(), "r", encoding="utf-8"))
+        else:
+            print("FAIL: Specified custom JSON file '{0}' does not exist.".format(cli_args.customFile))
+            exit(-1)
 
     # May as well disable guardrail checking if it's off
     if cli_args.guardrailCheck == 'on':
@@ -860,7 +1001,7 @@ def generate_document():
         generate_sentiment(speech_segments)
 
     # Write out our file and the performance statistics
-    write(cli_args, speech_segments)
+    write(cli_args, speech_segments, custom_json_data)
     finish = perf_counter()
     duration = round(finish - start, 2)
     print(f"> Transcript {cli_args.outputFile} writen in {duration} seconds.")
