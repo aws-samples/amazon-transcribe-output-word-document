@@ -706,6 +706,40 @@ def write(cli_arguments, speech_segments, custom_json):
         if "topics" in data:
             write_topic_reasons(document, data["topics"])
 
+        # Now output any entities that we discovered
+        if custom_json != {}:
+            # Get our entity lists
+            ent_locations = custom_json['inference_result']['spoken_locations']
+            ent_brands = custom_json['inference_result']['spoken_brand_names']
+            ent_all = custom_json['inference_result']['spoken_named_entities']
+            ent_all.sort()
+
+            # Write out the custom metadata table
+            document.add_section(WD_SECTION.CONTINUOUS)
+            table = document.add_table(rows=1, cols=1)
+            table.style = document.styles[TABLE_STYLE_STANDARD]
+            table.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = "Identities Found"
+            hdr_cells[0].width = Inches(3.5)
+
+            # Process each entity
+            for entity in ent_all:
+                # Work our the suffix, if any
+                text_to_add = ""
+                if entity in ent_locations:
+                    text_to_add = " (location)"
+                    ent_locations.remove(entity)
+                if entity in ent_brands:
+                    text_to_add = " (brand)"
+                    ent_brands.remove(entity)
+
+                # Add it on to our table
+                row_cells = table.add_row().cells
+                row_cells[0].text = entity + text_to_add
+                row_cells[0].width = Inches(3.5)
+                row_cells[0].paragraphs[0].runs[0].font.bold = False
+
         # Generate our raw data for the Comprehend sentiment graph (if requested)
         if sentimentEnabled:
             write_comprehend_sentiment(document, speech_segments, temp_files)
@@ -854,7 +888,7 @@ def write_comprehend_sentiment(document, speech_segments, temp_files):
     # Draw it out
     plt.title("Call Sentiment - Pos/Neg Only")
     plt.xlabel("Time (seconds)")
-    plt.axis([0, max(speaker0timestamps[-1], speaker1timestamps[-1]), -1.1, 1.25])
+    plt.axis([0, max(speaker0timestamps[-1], speaker1timestamps[-1]), -1.5, 1.5])
     plt.legend()
     plt.axhline(y=0, color='k')
     plt.axvline(x=0, color='k')
