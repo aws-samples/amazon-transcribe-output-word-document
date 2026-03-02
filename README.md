@@ -10,46 +10,43 @@ This Python3 application will process the results of a synchronous **Amazon Tran
 - **Transcribe Call Analytics Mode** - using the Call Analytics feature of Amazon Transcribe, the Word document will present all of the analytical data in either a tabular or graphical form
 - **BDA Audio Mode** - using the standard BDA Audio project, and optionally the contact center custom blueprint.  The standard project includes general transcript-related features, but the custom blueprint includes additional call-level features
 
-
-
 #### Features
 
-The following table summarise which features are available in each mode.  It should be noted that some missing items in BDA Audio can be done with a non-standard custom blueprint.  Also, not all features are supported by this demo, such as *Dominant Language Detection*.
+The following table summarise which features are available in each mode.  It should be noted that some missing items in BDA Audio can be done with a non-standard custom blueprint.  Not all features are supported by this demo, such as *Dominant Language Detection*, and please note that any entries highlighted with ****** have additional numbered caveats listed below the table.
 
 | **Feature**                           | **Transcribe**   | Call Analytics | BDA Audio        |
 | ------------------------------------- | ---------------- | -------------- | ---------------- |
 | ***Standard Call Characteristics***   |                  |                |                  |
-| Job information [1]                   | ✅                | ✅              | ❌                |
+| Job information                       | ✅                | ✅              | ❌                |
 | Word-level confidence scores          | ✅                | ✅              | ❌                |
 | Word-level timings                    | ✅                | ✅              | ✅                |
 | ***Sentiment Analysis***              |                  |                |                  |
-| Call-level sentiment [2]              | ❌                | ✅              | ✅                |
-| Speaker sentiment trend [2] [3]       | *Via Comprehend* | ✅              | ✅                |
+| Call-level sentiment [1]              | ❌                | ✅              | ✅**              |
+| Speaker sentiment trend [1] [2]       | *Via Comprehend* | ✅**            | ✅**              |
 | Turn-level sentiment                  | *Via Comprehend* | ✅              | *Via Comprehend* |
 | Turn-level sentiment scores           | *Via Comprehend* | ❌              | *Via Comprehend* |
 | ***Call Characteristics***            |                  |                |                  |
-| Call issue detection [2] [4]          | ❌                | ✅              | ✅                |
+| Call issue detection [1] [3]          | ❌                | ✅**            | ✅**              |
 | Call non-talk ("silent") time         | ❌                | ✅              | ❌                |
-| Category detection [5]                | ❌                | ✅              | ✅                |
-| Entity detection [2]                  | ❌                | ❌              | ✅                |
-| Generative call summarisation [4] [6] | ❌                | ✅              | ✅                |
+| Category detection                    | ❌                | ✅              | ✅                |
+| Entity detection [1]                  | ❌                | ❌              | ✅**              |
+| Generative call summarisation [3] [4] | ❌                | ✅**            | ✅                |
 | Named speaker identification          | ❌                | ✅              | ❌                |
+| PII identification [3] [4]            | ✅**              | ✅**            | ✅                |
+| PII redaction [4]                     | ✅**              | ✅**            | ✅                |
 | Speaker interruptions                 | ❌                | ✅              | ❌                |
 | Speaker talk time                     | ❌                | ✅              | ❌                |
 | Speaker volume                        | ❌                | ✅              | ❌                |
+| Topic detection                       | ❌                | ❌              | ✅                |
 | Toxicity detection                    | ✅                | ❌              | ✅                |
 
-*[1] The completed job, if it ever existed, can be manually deleted, and is not guaranteed to persist over time*
+*[1] This feature in BDA Audio is only possibly via a custom blueprint*
 
-*[2] This feature in BDA Audio is only possibly via a custom blueprint*
+*[2] Speaker sentiment trend in Transcribe Call Analytics only provides data points for each quarter of the call per speaker*
 
-*[3] Speaker sentiment trend in Transcribe Call Analytics only provides data points for each quarter of the call per speaker*
+*[3] This feature in Transcribe or Transcribe Call Analytics is only available on synchronous streams*
 
-*[4] This feature in Transcribe or Transcribe Call Analytics is only available on synchronous streams*
-
-*[5] Categories must first be defined by the customer, and only those defined when the job is executed will be reported*
-
-*[6] This feature in Transcribe or Transcribe Call Analytics is not available in all supported languages*
+*[4] This feature in Transcribe or Transcribe Call Analytics is not available in all supported languages, and may not be available in all Amazon Transcribe-supporting AWS Regions*
 
 
 

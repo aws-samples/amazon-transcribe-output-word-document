@@ -37,7 +37,6 @@ import boto3
 import argparse
 from io import BytesIO
 
-
 # Common formats and styles
 CUSTOM_STYLE_HEADER = "CustomHeader"
 TABLE_STYLE_STANDARD = "Light List"
@@ -60,12 +59,15 @@ MIN_SENTIMENT_LENGTH = 16
 MIN_SENTIMENT_NEGATIVE = 0.4
 MIN_SENTIMENT_POSITIVE = 0.6
 SENTIMENT_LANGUAGES = ["en", "es", "fr", "de", "it", "pt", "ar", "hi", "ja", "ko", "zh-TW", "zh"]
+LANG_MAPS = {
+    "cn": "zh",     # Chinese (Simplified)
+    "tw": "zh-TW"   # Chinese (Traditional/Taiwanese)
+}
 
 # Image download URLS
 IMAGE_URL_BANNER = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/banner-bda.png"
 IMAGE_URL_SMILE = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/smile.png"
 IMAGE_URL_FROWN = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/frown.png"
-IMAGE_URL_NEUTRAL = "https://raw.githubusercontent.com/aws-samples/amazon-transcribe-output-word-document/main/images/neutral.png"
 
 
 # Additional Constants
@@ -86,6 +88,7 @@ class SpeechSegment:
         self.segmentNegative = 0.0
         self.segmentIsPositive = False
         self.segmentIsNegative = False
+        self.segmentPIIList = []
 
 def convert_timestamp(time_in_seconds):
     """
@@ -148,7 +151,6 @@ def write_transcribe_text(output_table, cli_args, speech_segments, timed_topics)
     if cli_args.sentiment == 'on':
         png_smile = load_image(IMAGE_URL_SMILE)
         png_frown = load_image(IMAGE_URL_FROWN)
-        png_neutral = load_image(IMAGE_URL_NEUTRAL)
         content_col_offset = 0
     else:
         # Ensure we offset the CONTENT column correctly due to no sentiment
@@ -185,14 +187,33 @@ def write_transcribe_text(output_table, cli_args, speech_segments, timed_topics)
             timed_topics.pop(idx)
             topics_unmarked.pop(idx)
 
-        # Then do each word with confidence-level colouring
-        text_index = 1
+        # Then do each word with PII colouring
+        text_index = 0
+        pii_highlight = False
         for eachWord in segment.segmentConfidence:
+            # If this is the start or continuation of a PII redaction then set the highlight
+            if segment.segmentPIIList != []:
+                # Get the current PII - we may now be on to the next index
+                current_pii = segment.segmentPIIList[0]
+                if eachWord["start_time"] > current_pii["end_time"]:
+                    # Stop the highlight, move to the next PII
+                    pii_highlight = False
+                    segment.segmentPIIList.pop(0)
+                    if len(segment.segmentPIIList) > 0:
+                        current_pii = segment.segmentPIIList[0]
+
+                # If we're inside this PII segmenet we need to highlight.  We
+                # may have popped off the final entry just now, but that's okay
+                if  (eachWord["start_time"] >= current_pii["start_time"]) and \
+                    (eachWord["end_time"] <= current_pii["end_time"]):
+                    # Start of a new run
+                    pii_highlight = True
+
             # Output the next word, with the correct confidence styling and forced background
             run = row_cells[COL_CONTENT + content_col_offset].paragraphs[0].add_run(eachWord["text"])
             text_index += len(eachWord["text"])
             confLevel = eachWord["confidence"]
-            set_transcript_text_style(run, False, confidence=confLevel)
+            set_transcript_text_style(run, pii_highlight, confidence=confLevel)
 
         # Check if we have to add our guardrail results
         if cli_args.guardrailCheck == 'on':
@@ -224,13 +245,6 @@ def write_transcribe_text(output_table, cli_args, speech_segments, timed_topics)
                     img_run.add_picture(png_smile, width=Mm(4))
                 else:
                     img_run.add_picture(png_frown, width=Mm(4))
-
-                # We only have turn-by-turn sentiment score values in non-analytics mode
-                # text_run = paragraph.add_run(' (' + str(segment.segmentSentimentScore)[:4] + ')')
-                # text_run.font.size = SMALL_TEXT
-                # text_run.font.italic = True
-            # else:
-            #     row_cells[COL_SENTIMENT].paragraphs[0].add_run().add_picture(png_neutral, width=Mm(4))
 
         # Add highlighting to the row if required
         if shading_reqd:
@@ -277,10 +291,32 @@ def merge_speaker_segments(input_segment_list):
             lastSegment.segmentEndTime = segment.segmentEndTime
             lastSegment.segmentText += " " + segment.segmentText
             segment.segmentConfidence[0]["text"] = " " + segment.segmentConfidence[0]["text"]
+
+            # Copy any confidence scores and PII lists too
             for wordConfidence in segment.segmentConfidence:
                 lastSegment.segmentConfidence.append(wordConfidence)
+            for piiEntry in segment.segmentPIIList:
+                lastSegment.segmentPIIList.append(piiEntry)
 
     return outputSegmentList
+
+
+def transpose_language_code(transcript_lang):
+    """
+    Takes the transcript language code and remaps it one more suitable for Amazon Comprehend.
+    This is required and BDA and Comprehend do not share the same codes for some languages
+
+    :param: Language code from the transcript
+    :return: Amazon Comprehend-friendly language ode
+    """
+    
+    # If it's in our re-mapping list then use that, otherwise use what was supplied
+    comprehend_language = transcript_lang.lower()
+    if comprehend_language in LANG_MAPS.keys():
+        comprehend_language = LANG_MAPS[comprehend_language]
+
+    # Return our mapped (or original) code
+    return comprehend_language
 
 
 def generate_sentiment(segment_list):
@@ -294,8 +330,9 @@ def generate_sentiment(segment_list):
     # Get our botot3 client, then go through each segment
     client = boto3.client("comprehend")
     for nextSegment in segment_list:
-        # Only continue if Comprehent knows this language
-        if nextSegment.segmentLanguage in SENTIMENT_LANGUAGES:
+        # Only continue if Comprehend knows this language - remap it first for BDA/Comprehend compatibility
+        remapped_lang_code = transpose_language_code(nextSegment.segmentLanguage)
+        if remapped_lang_code in SENTIMENT_LANGUAGES:
             # Only continue if it's a long enough text fragment
             if len(nextSegment.segmentText) >= MIN_SENTIMENT_LENGTH:
                 nextText = nextSegment.segmentText
@@ -720,7 +757,7 @@ def write(cli_arguments, speech_segments, custom_json):
             table.style = document.styles[TABLE_STYLE_STANDARD]
             table.alignment = WD_ALIGN_PARAGRAPH.LEFT
             hdr_cells = table.rows[0].cells
-            hdr_cells[0].text = "Identities Found"
+            hdr_cells[0].text = "Entities Found"
             hdr_cells[0].width = Inches(3.5)
 
             # Process each entity
@@ -949,6 +986,17 @@ def create_turn_by_turn_segments(data, cli_args):
         nextSpeechSegment.segmentConfidence = confidenceList
         skipLeadingSpace = True
 
+        # PII data may not exist
+        if "sensitive_data_detection" in turn:
+            nextSpeechSegment.segmentPIIList = turn["sensitive_data_detection"]
+        else:
+            nextSpeechSegment.segmentPIIList = []
+
+        # Turn every PII timestamp into seconds from milliseconds (makes things easier later)
+        for pii_entry in nextSpeechSegment.segmentPIIList:
+            pii_entry["start_time"] = float(pii_entry["start_timestamp_millis"]) / 1000.0
+            pii_entry["end_time"] = float(pii_entry["end_timestamp_millis"]) / 1000.0
+
         # Process each word in this turn
         for word_ptr in turn["audio_item_indices"]:
             # Pick out our next data from a 'pronunciation'
@@ -1021,10 +1069,16 @@ def generate_document():
             print("FAIL: Specified custom JSON file '{0}' does not exist.".format(cli_args.customFile))
             exit(-1)
 
-    # May as well disable guardrail checking if it's off
+    # May as well disable guardrail checking if it's not in the result
     if cli_args.guardrailCheck == 'on':
         if "content_moderation" not in json_data['audio']:
             cli_args.guardrailCheck == 'off'
+
+    # Disable Comprehend sentiment analysis if Comprehend doesn't suppor the dominante language
+    if cli_args.sentiment == 'on':
+        dom_lang = json_data["metadata"]["dominant_asset_language"]
+        if transpose_language_code(dom_lang) not in SENTIMENT_LANGUAGES:
+            cli_args.sentiment = "off"
 
     # Generate the core transcript
     start = perf_counter()
